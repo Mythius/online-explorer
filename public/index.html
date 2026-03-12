@@ -65,15 +65,24 @@
         color: var(--text);
         text-decoration: none;
         cursor: pointer;
+        min-width: 0;
+        flex: 1;
       }
       .header-left svg {
         color: var(--primary);
         flex-shrink: 0;
       }
+      #appname {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        min-width: 0;
+      }
       .header-right {
         display: flex;
         align-items: center;
         gap: 10px;
+        flex-shrink: 0;
       }
 
       .user-chip {
@@ -851,17 +860,30 @@
       let currentUser = null;
       let currentPath = "";
       let currentItems = [];
+      let AUTH_REQUIRED = true;
 
       // ── INIT ────────────────────────────────────────────────────
       window.addEventListener("hashchange", () => {
         if (currentUser?.priv >= 1) loadFiles(pathFromHash());
       });
 
-      request("/appname").then((name) => {
-        document.getElementById("appname").textContent = name || "Files";
-      });
-
       async function init() {
+        // Load config first so AUTH_REQUIRED is known before routing
+        try {
+          const data = await request("/config");
+          document.getElementById("appname").textContent =
+            data.appName || "Files";
+          AUTH_REQUIRED = data.authRequired !== false;
+        } catch {}
+
+        if (!AUTH_REQUIRED) {
+          // No auth — go straight to file browser, hide all auth UI
+          currentUser = { priv: 1 };
+          document.getElementById("header-right").style.display = "none";
+          loadFiles(pathFromHash());
+          return;
+        }
+
         let res;
         try {
           res = await fetch("/user", { credentials: "include" });

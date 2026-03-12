@@ -15,7 +15,10 @@ exports.setAuthRef = function (getAuth, saveAuth) {
   _saveAuth = saveAuth;
 };
 
+const AUTH_REQUIRED = process.env.AUTH_REQUIRED !== "false";
+
 function requireAccess(req, res, next) {
+  if (!AUTH_REQUIRED) return next();
   if (!req.session.user || req.session.user.priv < 1) {
     return res.status(403).json({ error: "Access denied", needsAccess: true });
   }
@@ -44,8 +47,8 @@ function formatSize(bytes) {
 }
 
 exports.public = function (app) {
-  app.get("/appname", (_req, res) => {
-    res.json({ appName: process.env.APP_NAME || "File Explorer" });
+  app.get("/config", (_req, res) => {
+    res.json({ appName: process.env.APP_NAME || "File Explorer", authRequired: process.env.AUTH_REQUIRED !== "false" });
   });
 };
 
