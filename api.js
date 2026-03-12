@@ -168,14 +168,16 @@ exports.private = function (app) {
         .json({ error: "Admin email not configured. Set ADMIN_EMAIL in .env" });
     }
 
+    const siteUrl = `${req.protocol}://${req.get("host")}`;
+    const site_name = process.env.APP_NAME || "File Explorer";
     try {
       await mail.sendEmail(
         ADMIN_EMAIL,
         "File Explorer — Access Request",
         `<div style="font-family:system-ui,sans-serif;max-width:600px;margin:0 auto;padding:24px">
           <h2 style="color:#3b82f6;margin-top:0">Access Request</h2>
-          <p><strong>${name}</strong> (<a href="mailto:${email}">${email}</a>) is requesting access to the file explorer.</p>
-          <p style="color:#64748b;font-size:14px">Log in and use the Grant Access button, entering: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px">${email}</code></p>
+          <p><strong>${name}</strong> (<a href="mailto:${email}">${email}</a>) is requesting access to the ${site_name}.</p>
+          <p style="color:#64748b;font-size:14px">Log in at <a href="${siteUrl}">${siteUrl}</a> and use the Grant Access button, entering: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px">${email}</code></p>
         </div>`,
       );
       res.json({ message: "Access request sent successfully" });
