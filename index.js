@@ -54,8 +54,13 @@ function setAuthCookie(res, token) {
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
   });
 }
-app.listen(port, () => {
-  console.log(`Server is listening at http://localhost:${port}`);
+// Auth is loaded from disk before the server accepts connections, so the
+// in-memory `auth` object always reflects persisted state (including any
+// pre-granted priv values) before the first OAuth login can run.
+loadAuth().then(() => {
+  app.listen(port, () => {
+    console.log(`Server is listening at http://localhost:${port}`);
+  });
 });
 
 let auth = {};
@@ -92,6 +97,7 @@ function loadAuth() {
 function saveAuth() {
   file.save("auth.json", JSON.stringify(auth));
 }
+if (API.setAuthRef) API.setAuthRef(() => auth, saveAuth);
 
 function loginCallback(session) {
   saveAuth();
@@ -132,17 +138,18 @@ app.post("/auth/google-oneclick", async (req, res) => {
   try {
     let cred = req.body;
     let data = await verifyToken(cred.credential);
-    if (!(cred.email in auth)) {
-      auth[cred.email] = { priv: 0, token: "" };
+    const gcEmail = data.email.toLowerCase();
+    if (!(gcEmail in auth)) {
+      auth[gcEmail] = { priv: 0, token: "" };
     }
-    if (auth[cred.email].token) delete sessions[auth[cred.email].token];
-    let token = md5(new Date().toISOString() + cred.email);
-    sessions[token] = { user: auth[cred.email] };
+    if (auth[gcEmail].token) delete sessions[auth[gcEmail].token];
+    let token = md5(new Date().toISOString() + gcEmail);
+    sessions[token] = { user: auth[gcEmail] };
     sessions[token].username = cred.name;
-    sessions[token].email = data.email;
+    sessions[token].email = gcEmail;
     sessions[token].google_data = data;
     sessions[token].photoUrl = data.picture;
-    auth[cred.email].token = token;
+    auth[gcEmail].token = token;
     loginCallback(sessions[token]);
     setAuthCookie(res, token);
     res.status(200).json({ message: "Successfully Logged In" });
@@ -222,7 +229,7 @@ app.get("/auth/callback/google", async (req, res) => {
     });
 
     const payload = ticket.getPayload();
-    const email = payload.email;
+    const email = payload.email.toLowerCase();
     const name = payload.name;
 
     // Create or update user session
@@ -338,7 +345,7 @@ app.get("/auth/callback/microsoft", async (req, res) => {
       return res.status(400).json({ error: "Failed to retrieve user profile" });
     }
 
-    const email = profile.mail || profile.userPrincipalName;
+    const email = (profile.mail || profile.userPrincipalName).toLowerCase();
     const name = profile.displayName || email;
 
     // Fetch profile photo
@@ -406,7 +413,7 @@ app.get("/auth/callback/cas", async (req, res) => {
       return res.status(403).json({ error: "Invalid CAS token" });
     }
 
-    const email = user.email;
+    const email = user.email.toLowerCase();
     if (!(email in auth)) {
       auth[email] = { priv: 0, token: "" };
     }

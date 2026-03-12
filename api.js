@@ -1,57 +1,245 @@
-// const db = require('./db.js');
 const mail = require("./tools/mail.js");
+const path = require("path");
+const fs = require("fs");
+const archiver = require("archiver");
+
+const FILES_PATH = process.env.FILES_PATH || "/Users/matthias/Documents";
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || process.env.GMAIL_USER || "";
+
+let _getAuth = null;
+let _saveAuth = null;
+
+/** Called by index.js to share the auth object reference and saveAuth function */
+exports.setAuthRef = function (getAuth, saveAuth) {
+  _getAuth = getAuth;
+  _saveAuth = saveAuth;
+};
+
+function requireAccess(req, res, next) {
+  if (!req.session.user || req.session.user.priv < 1) {
+    return res.status(403).json({ error: "Access denied", needsAccess: true });
+  }
+  next();
+}
+
+/** Resolves a user-supplied relative path against FILES_PATH, preventing traversal */
+function resolveSafePath(reqPath) {
+  const normalized = reqPath
+    ? path.normalize(reqPath.replace(/^[/\\]+/, ""))
+    : "";
+  const resolved = path.join(FILES_PATH, normalized);
+  if (resolved !== FILES_PATH && !resolved.startsWith(FILES_PATH + path.sep)) {
+    return null;
+  }
+  return resolved;
+}
+
+function formatSize(bytes) {
+  if (bytes == null) return null;
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  if (bytes < 1024 * 1024 * 1024)
+    return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  return (bytes / 1024 / 1024 / 1024).toFixed(1) + " GB";
+}
+
 exports.public = function (app) {
-  app.get("/hello", (req, res) => {
-    res.json({ message: "Hello World" });
+  app.get("/appname", (_req, res) => {
+    res.json({ appName: process.env.APP_NAME || "File Explorer" });
   });
 };
 
 exports.private = function (app) {
+  // User info — priv level exposed so frontend knows access state
   app.get("/user", (req, res) => {
-    res.json(
-      req.session.cas_data ||
-        req.session.google_data ||
-        req.session.microsoft_data ||
-        {},
+    res.json({
+      username: req.session.username,
+      email: req.session.email,
+      photoUrl: req.session.photoUrl,
+      priv: req.session.user?.priv || 0,
+    });
+  });
+
+  // List directory contents
+  app.get("/files", requireAccess, (req, res) => {
+    const reqPath = req.query.path || "";
+    const safePath = resolveSafePath(reqPath);
+    if (!safePath) return res.status(400).json({ error: "Invalid path" });
+
+    try {
+      if (!fs.existsSync(safePath) || !fs.statSync(safePath).isDirectory()) {
+        return res.status(404).json({ error: "Directory not found" });
+      }
+
+      const entries = fs.readdirSync(safePath, { withFileTypes: true });
+      const items = entries
+        .filter((e) => !e.name.startsWith("."))
+        .map((e) => {
+          const fullPath = path.join(safePath, e.name);
+          let sizeBytes = null,
+            sizeFormatted = null,
+            modified = null;
+          try {
+            const stat = fs.statSync(fullPath);
+            if (e.isFile()) {
+              sizeBytes = stat.size;
+              sizeFormatted = formatSize(stat.size);
+            }
+            modified = stat.mtime.toISOString();
+          } catch {}
+          return {
+            name: e.name,
+            type: e.isDirectory() ? "directory" : "file",
+            sizeBytes,
+            sizeFormatted,
+            modified,
+          };
+        })
+        .sort((a, b) => {
+          if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
+          return a.name.localeCompare(b.name, undefined, {
+            sensitivity: "base",
+          });
+        });
+
+      res.json({ items, path: reqPath });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to read directory" });
+    }
+  });
+
+  // Download a single file
+  app.get("/files/download", requireAccess, (req, res) => {
+    const reqPath = req.query.path || "";
+    const safePath = resolveSafePath(reqPath);
+    if (!safePath) return res.status(400).json({ error: "Invalid path" });
+
+    if (!fs.existsSync(safePath))
+      return res.status(404).json({ error: "File not found" });
+    if (!fs.statSync(safePath).isFile())
+      return res.status(400).json({ error: "Not a file" });
+
+    res.download(safePath);
+  });
+
+  // Zip and download an entire directory
+  app.get("/files/download-all", requireAccess, (req, res) => {
+    const reqPath = req.query.path || "";
+    const safePath = resolveSafePath(reqPath);
+    if (!safePath) return res.status(400).json({ error: "Invalid path" });
+
+    if (!fs.existsSync(safePath))
+      return res.status(404).json({ error: "Directory not found" });
+
+    const folderName = path.basename(safePath) || "files";
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${folderName}.zip"`,
     );
+
+    const archive = archiver("zip", { zlib: { level: 6 } });
+    archive.on("error", (err) => {
+      console.error("Archive error:", err);
+      if (!res.headersSent) res.status(500).end();
+    });
+    archive.pipe(res);
+    archive.directory(safePath, false);
+    archive.finalize();
+  });
+
+  // Request access — any authenticated user can send a request email to admin
+  app.post("/access/request", async (req, res) => {
+    const session = req.session;
+    const email = session.email || session.username || "unknown";
+    const name = session.username || email;
+
+    if (session.user?.priv >= 1) {
+      return res.json({ message: "You already have access" });
+    }
+
+    if (!ADMIN_EMAIL) {
+      return res
+        .status(500)
+        .json({ error: "Admin email not configured. Set ADMIN_EMAIL in .env" });
+    }
+
+    try {
+      await mail.sendEmail(
+        ADMIN_EMAIL,
+        "File Explorer — Access Request",
+        `<div style="font-family:system-ui,sans-serif;max-width:600px;margin:0 auto;padding:24px">
+          <h2 style="color:#3b82f6;margin-top:0">Access Request</h2>
+          <p><strong>${name}</strong> (<a href="mailto:${email}">${email}</a>) is requesting access to the file explorer.</p>
+          <p style="color:#64748b;font-size:14px">Log in and use the Grant Access button, entering: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px">${email}</code></p>
+        </div>`,
+      );
+      res.json({ message: "Access request sent successfully" });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Failed to send email: " + e.message });
+    }
+  });
+
+  // Grant file-browser access to any email address (any user with access can do this)
+  app.post("/access/grant", requireAccess, (req, res) => {
+    const { email } = req.body;
+    if (!email || typeof email !== "string" || !email.includes("@")) {
+      return res.status(400).json({ error: "Valid email required" });
+    }
+
+    const trimmed = email.trim();
+    const auth = _getAuth ? _getAuth() : null;
+    if (!auth)
+      return res.status(500).json({ error: "Auth store not available" });
+
+    const existingKey = Object.keys(auth).find(
+      (k) => k.toLowerCase() === trimmed.toLowerCase(),
+    );
+
+    if (existingKey) {
+      auth[existingKey].priv = 1;
+    } else {
+      auth[trimmed] = { priv: 1, token: "" };
+    }
+
+    if (_saveAuth) _saveAuth();
+    res.json({ message: `Access granted to ${trimmed}` });
+  });
+
+  // List all users and their access level
+  app.get("/access/users", requireAccess, (_req, res) => {
+    const auth = _getAuth ? _getAuth() : null;
+    if (!auth)
+      return res.status(500).json({ error: "Auth store not available" });
+
+    const users = Object.entries(auth)
+      .map(([email, data]) => ({ email, priv: data.priv || 0 }))
+      .sort((a, b) => a.email.localeCompare(b.email));
+
+    res.json({ users });
+  });
+
+  // Revoke file-browser access
+  app.post("/access/revoke", requireAccess, (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email required" });
+
+    const auth = _getAuth ? _getAuth() : null;
+    if (!auth)
+      return res.status(500).json({ error: "Auth store not available" });
+
+    const existingKey = Object.keys(auth).find(
+      (k) => k.toLowerCase() === email.trim().toLowerCase(),
+    );
+    if (existingKey) {
+      auth[existingKey].priv = 0;
+      if (_saveAuth) _saveAuth();
+    }
+
+    res.json({ message: `Access revoked for ${email.trim()}` });
   });
 };
 
-exports.onLogin = function (session) {};
-
-/* session.google_data
-
-{
-  iss: 'https://accounts.google.com',
-  azp: '1016767921529-7km6ac8h3cud3256dqjqha6neiufn2om.apps.googleusercontent.com',
-  aud: '1016767921529-7km6ac8h3cud3256dqjqha6neiufn2om.apps.googleusercontent.com',
-  sub: '103589682456946370010',
-  email: 'southwickmatthias@gmail.com',
-  email_verified: true,
-  nbf: 1723080904,
-  name: 'Matthias Southwick',
-  picture: 'https://lh3.googleusercontent.com/a/ACg8ocLjdsGc7uC2mmthGuvrPpmV2AFT2U_EdiXxon8tX5QwbR7m8VYkeA=s96-c',
-  given_name: 'Matthias',
-  family_name: 'Southwick',
-  iat: 1723081204,
-  exp: 1723084804,
-  jti: 'ad27c4b889a0eb48b6ce4cf6690fca739892ca88'
-}
-
-*/
-/* session.microsoft_data: {
-  '@odata.context': 'https://graph.microsoft.com/v1.0/$metadata#users/$entity',
-  userPrincipalName: 'Southwickmatthias@gmail.com',
-  id: '4a1639e4ad5f1ca5',
-  displayName: 'Matthias Southwick',
-  surname: 'Southwick',
-  givenName: 'Matthias',
-  preferredLanguage: 'en-US',
-  mail: null,
-  mobilePhone: null,
-  jobTitle: null,
-  officeLocation: null,
-  businessPhones: []
-}
-
-*/
+exports.onLogin = function (_session) {};
