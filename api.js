@@ -19,6 +19,7 @@ const AUTH_REQUIRED = process.env.AUTH_REQUIRED !== "false";
 
 function requireAccess(req, res, next) {
   if (!AUTH_REQUIRED) return next();
+  if (req.session.username && res.session.username == process.env.ADMIN_EMAIL) return next();
   if (!req.session.user || req.session.user.priv < 1) {
     return res.status(403).json({ error: "Access denied", needsAccess: true });
   }
