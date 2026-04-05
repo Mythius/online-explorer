@@ -19,7 +19,9 @@ const AUTH_REQUIRED = process.env.AUTH_REQUIRED !== "false";
 
 function requireAccess(req, res, next) {
   if (!AUTH_REQUIRED) return next();
-  if (req.session.username && res.session.username == process.env.ADMIN_EMAIL) return next();
+  console.log(process.env.ADMIN_EMAIL);
+  if (req.session.email && req.session.email == process.env.ADMIN_EMAIL)
+    return next();
   if (!req.session.user || req.session.user.priv < 1) {
     return res.status(403).json({ error: "Access denied", needsAccess: true });
   }
@@ -49,18 +51,24 @@ function formatSize(bytes) {
 
 exports.public = function (app) {
   app.get("/config", (_req, res) => {
-    res.json({ appName: process.env.APP_NAME || "File Explorer", authRequired: process.env.AUTH_REQUIRED !== "false" });
+    res.json({
+      appName: process.env.APP_NAME || "File Explorer",
+      authRequired: process.env.AUTH_REQUIRED !== "false",
+    });
   });
 };
 
 exports.private = function (app) {
   // User info — priv level exposed so frontend knows access state
   app.get("/user", (req, res) => {
+    let priv = 0;
+    priv |= req.session.user?.priv;
+    if (req.session.email == process.env.ADMIN_EMAIL) priv = 1;
     res.json({
       username: req.session.username,
       email: req.session.email,
       photoUrl: req.session.photoUrl,
-      priv: req.session.user?.priv || 0,
+      priv: priv,
     });
   });
 
